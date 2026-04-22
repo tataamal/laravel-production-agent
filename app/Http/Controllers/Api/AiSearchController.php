@@ -4,9 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use Google\Gemini\Laravel\Facades\Gemini;
-use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 class AiSearchController extends Controller
@@ -17,7 +17,6 @@ class AiSearchController extends Controller
         $apiKey = env('GEMINI_API_KEY');
 
         // Menggunakan gemini-1.5-flash-latest (ini alias paling stabil saat ini)
-        $url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=" . $apiKey;
 
         $context = "
         ROLE: 
@@ -68,21 +67,32 @@ class AiSearchController extends Controller
         $response = Http::timeout(120)->withHeaders([
             'Content-Type' => 'application/json',
             'X-goog-api-key' => $apiKey, // Gunakan header ini sesuai curl tadi
-        ])->post("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent", [
-                    'contents' => [
-                        [
-                            'parts' => [
-                                ['text' => "Role: PostgreSQL Expert. \nContext: $context \nQuestion: " . $userPrompt]
-                            ]
-                        ]
-                    ]
-                ]);
+        ])->post('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent', [
+            'contents' => [
+                [
+                    'parts' => [
+                        ['text' => "Role: PostgreSQL Expert. \nContext: $context \nQuestion: ".$userPrompt],
+                    ],
+                ],
+            ],
+        ]);
 
         if ($response->failed()) {
+            $httpCode = $response->status();
+            $googleDetail = $response->json('error.message') ?? $response->json('error') ?? 'No detail returned.';
+
+            $userMessage = match (true) {
+                $httpCode === 429 => 'Kuota API Google habis atau rate limit tercapai. Tunggu beberapa saat lalu coba lagi.',
+                $httpCode === 401 || $httpCode === 403 => 'API key tidak valid atau tidak memiliki izin akses.',
+                $httpCode >= 500 => 'Layanan Google AI sedang mengalami gangguan. Coba lagi nanti.',
+                default => 'Terjadi kesalahan saat menghubungi Google AI API.',
+            };
+
             return response()->json([
                 'error' => 'Google API Error',
-                'details' => $response->json()
-            ], $response->status());
+                'message' => $userMessage,
+                'detail' => is_array($googleDetail) ? json_encode($googleDetail) : $googleDetail,
+            ], $httpCode);
         }
 
         $sql = $response->json('candidates.0.content.parts.0.text');
@@ -90,10 +100,10 @@ class AiSearchController extends Controller
         // Pastikan string SQL bersih
         $sql = trim(str_replace(['```sql', '```', "\n"], ' ', $sql));
 
-        if (!str_starts_with(strtoupper($sql), 'SELECT')) {
+        if (! str_starts_with(strtoupper($sql), 'SELECT')) {
             return response()->json([
                 'status' => 'need_confirmation',
-                'message' => $sql // Mengembalikan pertanyaan Gemini: "Mohon konfirmasi lokasi..."
+                'message' => $sql, // Mengembalikan pertanyaan Gemini: "Mohon konfirmasi lokasi..."
             ], 200);
         }
 
@@ -104,9 +114,9 @@ class AiSearchController extends Controller
             if (empty($data)) {
                 return response()->json([
                     'status' => 'success',
-                    'insight' => "Maaf, tidak ditemukan data untuk permintaan tersebut.",
+                    'insight' => 'Maaf, tidak ditemukan data untuk permintaan tersebut.',
                     'query_generated' => $sql,
-                    'data' => []
+                    'data' => [],
                 ]);
             }
 
@@ -118,36 +128,36 @@ class AiSearchController extends Controller
             $insightResponse = Http::timeout(60)->withHeaders([
                 'Content-Type' => 'application/json',
                 'X-goog-api-key' => $apiKey,
-            ])->post("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent", [
-                        'contents' => [
+            ])->post('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent', [
+                'contents' => [
+                    [
+                        'parts' => [
                             [
-                                'parts' => [
-                                    [
-                                        'text' => "Berdasarkan data JSON: $dataString. \nJawablah pertanyaan user: '$userPrompt' dengan gaya profesional, ringkas, dan fokus pada angka utama. Gunakan Bahasa Indonesia."
-                                    ]
-                                ]
-                            ]
-                        ]
-                    ]);
+                                'text' => "Berdasarkan data JSON: $dataString. \nJawablah pertanyaan user: '$userPrompt' dengan gaya profesional, ringkas, dan fokus pada angka utama. Gunakan Bahasa Indonesia.",
+                            ],
+                        ],
+                    ],
+                ],
+            ]);
 
             // Ambil hasil insight
-            $insight = $insightResponse->json('candidates.0.content.parts.0.text') ?? "Data berhasil ditarik, namun gagal merangkum insight.";
+            $insight = $insightResponse->json('candidates.0.content.parts.0.text') ?? 'Data berhasil ditarik, namun gagal merangkum insight.';
 
             return response()->json([
                 'status' => 'success',
                 'insight' => trim($insight),
                 'query_generated' => $sql,
-                'data' => $data // Tetap kirim semua data asli ke Copilot
+                'data' => $data, // Tetap kirim semua data asli ke Copilot
             ]);
 
         } catch (\Exception $e) {
             // Log error untuk mempermudah debugging di server
-            Log::error("SQL Error: " . $e->getMessage(), ['sql' => $sql]);
+            Log::error('SQL Error: '.$e->getMessage(), ['sql' => $sql]);
 
             return response()->json([
                 'error' => 'Query Execution Failed',
                 'sql' => $sql,
-                'message' => 'Terjadi kesalahan saat mengakses database.'
+                'message' => 'Terjadi kesalahan saat mengakses database.',
             ], 500);
         }
     }
