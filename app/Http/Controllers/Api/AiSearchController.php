@@ -7,6 +7,7 @@ use Google\Gemini\Laravel\Facades\Gemini;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class AiSearchController extends Controller
 {
@@ -99,13 +100,22 @@ class AiSearchController extends Controller
         try {
             $data = DB::select($sql);
 
-            // --- TAMBAHKAN LOGIC INSIGHT DI SINI ---
+            // Jika data kosong, langsung beri tahu user tanpa panggil AI lagi (hemat kuota)
+            if (empty($data)) {
+                return response()->json([
+                    'status' => 'success',
+                    'insight' => "Maaf, tidak ditemukan data untuk permintaan tersebut.",
+                    'query_generated' => $sql,
+                    'data' => []
+                ]);
+            }
 
-            // Gabungkan data hasil query menjadi teks singkat untuk dikirim ke Gemini
-            $dataString = json_encode($data);
+            // Ambil maksimal 50 baris data saja untuk insight agar tidak hit limit token
+            $dataForInsight = array_slice($data, 0, 50);
+            $dataString = json_encode($dataForInsight);
             $userPrompt = $request->input('message');
 
-            $insightResponse = Http::withHeaders([
+            $insightResponse = Http::timeout(60)->withHeaders([
                 'Content-Type' => 'application/json',
                 'X-goog-api-key' => $apiKey,
             ])->post("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent", [
@@ -113,29 +123,31 @@ class AiSearchController extends Controller
                             [
                                 'parts' => [
                                     [
-                                        'text' => "Berdasarkan data JSON berikut: $dataString. 
-                                   Jawablah pertanyaan user: '$userPrompt' dengan gaya bahasa yang profesional dan ringkas (insight). 
-                                   Gunakan Bahasa Indonesia."
+                                        'text' => "Berdasarkan data JSON: $dataString. \nJawablah pertanyaan user: '$userPrompt' dengan gaya profesional, ringkas, dan fokus pada angka utama. Gunakan Bahasa Indonesia."
                                     ]
                                 ]
                             ]
                         ]
                     ]);
 
-            $insight = $insightResponse->json('candidates.0.content.parts.0.text');
+            // Ambil hasil insight
+            $insight = $insightResponse->json('candidates.0.content.parts.0.text') ?? "Data berhasil ditarik, namun gagal merangkum insight.";
 
             return response()->json([
                 'status' => 'success',
-                'insight' => trim($insight), // Ini hasil rangkuman AI
+                'insight' => trim($insight),
                 'query_generated' => $sql,
-                'data' => $data
+                'data' => $data // Tetap kirim semua data asli ke Copilot
             ]);
 
         } catch (\Exception $e) {
+            // Log error untuk mempermudah debugging di server
+            Log::error("SQL Error: " . $e->getMessage(), ['sql' => $sql]);
+
             return response()->json([
                 'error' => 'Query Execution Failed',
                 'sql' => $sql,
-                'message' => $e->getMessage()
+                'message' => 'Terjadi kesalahan saat mengakses database.'
             ], 500);
         }
     }
